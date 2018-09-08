@@ -1,4 +1,4 @@
-### Home Assistant Platform to integrate Phillip TVs' Ambilights as a Light Component using the JointSpace API ###
+### Home Assistant Platform to integrate Phillip TVs' Ambilights as a Light Component using the JointSpace API ###HOT_LAVA
 
 
 import json
@@ -9,26 +9,24 @@ import voluptuous as vol
 from homeassistant.components.light import (ATTR_BRIGHTNESS, Light, PLATFORM_SCHEMA, ATTR_HS_COLOR,
                                             SUPPORT_BRIGHTNESS, SUPPORT_COLOR, ATTR_EFFECT, SUPPORT_EFFECT)
 from homeassistant.const import (CONF_HOST, CONF_NAME, CONF_USERNAME, CONF_PASSWORD)
-from requests.auth import HTTPDigestAuth
-from requests.adapters import HTTPAdapter
 
 DEFAULT_DEVICE = 'default'
 DEFAULT_HOST = '127.0.0.1'
-DEFAULT_USER = 'user'
-DEFAULT_PASS = 'pass'
+DEFAULT_USER = ''
+DEFAULT_PASS = ''
 DEFAULT_NAME = 'TV Ambilights'
-BASE_URL = 'https://{0}:1926/6/{1}' # for older philps tv's, try changing this to 'http://{0}:1925/1/{1}'
 DEFAULT_HUE = 360
 DEFAULT_SATURATION = 0
 DEFAULT_BRIGHTNESS = 255
 TIMEOUT = 5.0
 CONNFAILCOUNT = 5
 
+REQUIREMENTS = ['ha-philipsjs==0.0.5']
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 	vol.Required(CONF_HOST, default=DEFAULT_HOST): cv.string,
-	vol.Required(CONF_USERNAME, default=DEFAULT_USER): cv.string,
-	vol.Required(CONF_PASSWORD, default=DEFAULT_PASS): cv.string,
+	vol.Optional(CONF_USERNAME, default=DEFAULT_USER): cv.string,
+	vol.Optional(CONF_PASSWORD, default=DEFAULT_PASS): cv.string,
 	vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string
 })
 
@@ -48,36 +46,42 @@ EFFECT_SPECTRUM = "Spectrum"
 EFFECT_SCANNER = "Scanner"
 EFFECT_RHYTHM = "Rhythm"
 EFFECT_RANDOM = "Party"
+EFFECT_HOT_LAVA = "Hot Lava"
 DEFAULT_EFFECT = EFFECT_MANUAL
 
 # this is the list of effects, you can safely remove any effects from the list below to remove them from the front-end
-AMBILIGHT_EFFECT_LIST = [EFFECT_MANUAL, EFFECT_STANDARD, EFFECT_NATURAL, EFFECT_IMMERSIVE, EFFECT_VIVID, 
+AMBILIGHT_EFFECT_LIST = [EFFECT_MANUAL, EFFECT_HOT_LAVA, EFFECT_STANDARD, EFFECT_NATURAL, EFFECT_IMMERSIVE, EFFECT_VIVID, 
                         EFFECT_GAME, EFFECT_COMFORT, EFFECT_RELAX, EFFECT_ADAP_BRIGHTNESS, EFFECT_ADAP_COLOR,
                         EFFECT_RETRO, EFFECT_SPECTRUM, EFFECT_SCANNER, EFFECT_RHYTHM, EFFECT_RANDOM]
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-	name = config.get(CONF_NAME)
-	host = config.get(CONF_HOST)
-	user = config.get(CONF_USERNAME)
-	password = config.get(CONF_PASSWORD)
-	add_devices([Ambilight(name, host, user, password)])
+    import haphilipsjs
+
+    name = config.get(CONF_NAME)
+    host = config.get(CONF_HOST)
+    user = config.get(CONF_USERNAME)
+    password = config.get(CONF_PASSWORD)
+    tvapi = haphilipsjs.PhilipsTV(
+        host,
+        user=user or None,
+        password=password or None,
+    )
+    add_devices([Ambilight(tvapi, name)])
 
 OLD_STATE = [DEFAULT_HUE, DEFAULT_SATURATION, DEFAULT_BRIGHTNESS, DEFAULT_EFFECT]
 
 class Ambilight(Light):
 
-    def __init__(self, name, host, user, password):
+    def __init__(self, tvapi, name):
+        self._tv = tvapi
         self._name = name
-        self._host = host
-        self._user = user
-        self._password = password
         self._state = None
         self._connfail = 0
         self._brightness = None
         self._hs = None
+        self._available = False
         self._effect = None
-        self._session = requests.Session()
-        self._session.mount('https://', HTTPAdapter(pool_connections=1))
+        self._effect_list = []
 
 
     @property
@@ -89,12 +93,16 @@ class Ambilight(Light):
         return self._state
 
     @property
+    def available(self):
+        return self._available
+
+    @property
     def supported_features(self):
         return SUPPORT_BRIGHTNESS | SUPPORT_COLOR | SUPPORT_EFFECT
 
     @property
     def effect_list(self):
-        return AMBILIGHT_EFFECT_LIST
+        return self._effect_list
 
     @property
     def brightness(self):
@@ -113,17 +121,22 @@ class Ambilight(Light):
         return True
 
     def turn_on(self, **kwargs):
+        effect = kwargs.get(ATTR_EFFECT)
+        if effect:
+            if self._tv.setAmbilightStyle(effect):
+                self._effect = effect
+        return 
         if ATTR_HS_COLOR in kwargs:
             self._hs = kwargs[ATTR_HS_COLOR]
             convertedHue = int(self._hs[0]*(255/360))
             convertedSaturation = int(self._hs[1]*(255/100))
-            self._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
+            self._tv._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
             "colorSettings":{"color":{"hue":convertedHue,"saturation":convertedSaturation,"brightness":self._brightness},
             "colorDelta":{"hue":0,"saturation":0,"brightness":0},"speed":255}} )
 
         elif ATTR_BRIGHTNESS in kwargs:
             convertedBrightness = kwargs[ATTR_BRIGHTNESS]
-            self._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
+            self._tv._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
             "colorSettings":{"color":{"hue":int(self._hs[0]*(255/360)),"saturation":int(self._hs[1]*(255/100)),
             "brightness":convertedBrightness},"colorDelta":{"hue":0,"saturation":0,"brightness":0},"speed":255}} )
 
@@ -133,7 +146,7 @@ class Ambilight(Light):
 
         else:
             if OLD_STATE[3] == EFFECT_MANUAL:
-                self._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
+                self._tv._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
                 "colorSettings":{"color":{"hue":int(OLD_STATE[0]*(255/360)),"saturation":int(OLD_STATE[1]*(255/100)),
                 "brightness":OLD_STATE[2]},"colorDelta":{"hue":0,"saturation":0,"brightness":0},"speed":255}} )
             else: 
@@ -143,19 +156,22 @@ class Ambilight(Light):
     def turn_off(self, **kwargs):
         global OLD_STATE
         OLD_STATE = [self._hs[0], self._hs[1], self._brightness, self._effect]
-        self._postReq('ambilight/power', {'power':'Off'})
+        self._tv.setAmbilightPower(False)
         self._state = False
 		
     def getState(self):
-        fullstate = self._getReq('ambilight/currentconfiguration')
-        if fullstate:
+        self._tv.getAmbilight()
+        self._tv.getAmbilightStyles()
+        if self._tv.ambilight:
+            fullstate = self._tv.ambilight['currentconfiguration']
+            self._state = self._tv.ambilight['power_on']
+            self._available = True
             styleName = fullstate['styleName']
             if styleName:
-                self._available = True
                 if styleName == 'FOLLOW_COLOR':
                     isExpert = fullstate['isExpert']
                     if isExpert == True:
-                        self._state = True
+#                         self._state = True
                         colorSettings = fullstate['colorSettings']
                         color = colorSettings['color']
                         hue = color['hue']
@@ -167,9 +183,12 @@ class Ambilight(Light):
                     else:
                         self._hs = (DEFAULT_HUE, DEFAULT_SATURATION)
                         self._brightness = DEFAULT_BRIGHTNESS
+                    effect = fullstate['menuSetting']
+                    if effect == "HOT_LAVA":
+                        self._effect = EFFECT_HOT_LAVA
 
                 elif styleName == 'FOLLOW_VIDEO':
-                    self._state = True
+#                     self._state = True
                     self._hs = (DEFAULT_HUE, DEFAULT_SATURATION)
                     self._brightness = DEFAULT_BRIGHTNESS
                     effect = fullstate['menuSetting']
@@ -189,7 +208,7 @@ class Ambilight(Light):
                         self._effect = EFFECT_RELAX
                     
                 elif styleName == 'FOLLOW_AUDIO':
-                    self._state = True
+#                     self._state = True
                     self._hs = (DEFAULT_HUE, DEFAULT_SATURATION)
                     self._brightness = DEFAULT_BRIGHTNESS
                     effect = fullstate['menuSetting']
@@ -208,49 +227,70 @@ class Ambilight(Light):
                     elif effect == "MODE_RANDOM":
                         self._effect = EFFECT_RANDOM
 
-            else:
-                self._available = False
-                self._state = False
+        else:
+            self._available = False
+            self._state = False
 
     def update(self):
-        self.getState()
+        self._tv.getAmbilight()
+        self._tv.getAmbilightStyles()
+        if not self._tv.ambilight:
+            self._available = False
+            self._state = False
+            return
+
+        self._available = True
+        self._state = True
+
+        if not self._effect_list:
+            self._effect_list = list(
+                self._tv.ambilight_supportedstyles.values()
+            )
+
+        current_effect = (
+            self._tv.ambilight['styleName'],
+            self._tv.ambilight.get('menuSetting')
+        )
+        self._effect = self._tv.ambilight_supportedstyles.get(current_effect)
 
     def set_effect(self, effect):
         if effect:
             if effect == EFFECT_MANUAL:
-                self._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
+                self._tv._postReq('ambilight/currentconfiguration',{"styleName":"FOLLOW_COLOR","isExpert":True,"algorithm":"MANUAL_HUE",
                 "colorSettings":{"color":{"hue":int(OLD_STATE[0]*(255/360)),"saturation":int(OLD_STATE[1]*(255/100)),
                 "brightness":OLD_STATE[2]},"colorDelta":{"hue":0,"saturation":0,"brightness":0},"speed":255}} )
                 self._hs = (OLD_STATE[0], OLD_STATE[1])
                 self._brightness = OLD_STATE[2]
+            elif effect == EFFECT_HOT_LAVA:
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_COLOR","isExpert":False,"menuSetting":"HOT_LAVA"})
             elif effect == EFFECT_STANDARD:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"STANDARD"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"STANDARD"})
             elif effect == EFFECT_NATURAL:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"NATURAL"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"NATURAL"})
             elif effect == EFFECT_IMMERSIVE:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"IMMERSIVE"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"IMMERSIVE"})
             elif effect == EFFECT_VIVID:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"VIVID"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"VIVID"})
             elif effect == EFFECT_GAME:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"GAME"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"GAME"})
             elif effect == EFFECT_COMFORT:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"COMFORT"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"COMFORT"})
             elif effect == EFFECT_RELAX:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"RELAX"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_VIDEO","isExpert":False,"menuSetting":"RELAX"})
             elif effect == EFFECT_ADAP_BRIGHTNESS:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"ENERGY_ADAPTIVE_BRIGHTNESS"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"ENERGY_ADAPTIVE_BRIGHTNESS"})
             elif effect == EFFECT_ADAP_COLOR:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"ENERGY_ADAPTIVE_COLORS"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"ENERGY_ADAPTIVE_COLORS"})
             elif effect == EFFECT_RETRO:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"VU_METER"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"VU_METER"})
             elif effect == EFFECT_SPECTRUM:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"SPECTRUM_ANALYSER"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"SPECTRUM_ANALYSER"})
             elif effect == EFFECT_SCANNER:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"KNIGHT_RIDER_ALTERNATING"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"KNIGHT_RIDER_ALTERNATING"})
             elif effect == EFFECT_RHYTHM:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"RANDOM_PIXEL_FLASH"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"RANDOM_PIXEL_FLASH"})
             elif effect == EFFECT_RANDOM:
-                self._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"MODE_RANDOM"})
+                self._tv._postReq('ambilight/currentconfiguration', {"styleName":"FOLLOW_AUDIO","isExpert":False,"menuSetting":"MODE_RANDOM"})
 
     def _getReq(self, path):
         try:
